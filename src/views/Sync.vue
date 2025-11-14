@@ -1,0 +1,487 @@
+<template>
+   	<article class="app-view sync-view">
+	   	<AppHeader>
+			<template #primary>
+				<h1>{{ translate("SYNC.TITLE") }}</h1>
+			</template>
+		</AppHeader>
+		<main>
+
+            <div v-if="enabled" style="width:100%;">
+                <center><div class="hspace-5">
+		    <button class="btn btn-success" @click="addSyncPair()">{{ translate("SYNC.ADDPAIR") }}</button>
+                </div>
+                <div style="padding:1em">Status: {{ status }}</div>
+                <div v-if="hasError" style="padding:1em">Previous error: {{ error }}</div>
+                </center>
+                <div style="display:flex; flex-direction:column">
+                   <div v-for="pair in syncPairs" style="display:flex; flex-direction:row; flex-wrap:wrap; padding:1em; margin:.5em; border:solid #16a98a;">
+                      <label style="padding:1em; flex-grow:1; text-align:center;"> Syncing </label>
+                      <label style="padding:1em; flex-grow:1; text-align:center;">{{ prettifyHostFolder(pair.localpath) }}</label>
+                      <label style=" flex-grow:1; text-align:center; padding:1em;"> to and from </label>
+                      <a v-on:click="navigateTo(pair.remotepath)" style="cursor:pointer; padding:1em; flex-grow:1; text-align:center;">{{ pair.remotepath }}</a>
+                      <label style="padding:1em; flex-grow:1; text-align:center;"> Syncing local deletes: {{ pair.syncLocalDeletes }}</label>
+                      <label style="padding:1em; flex-grow:1; text-align:center;"> Syncing remote deletes: {{ pair.syncRemoteDeletes }}</label>
+                      <button class="btn btn-success" @click="syncNow(pair.label)" style="flex-grow:1;margin:10px;">{{ translate("SYNC.NOW") }}</button>
+                      <button class="btn btn-warning" @click="removeSyncPair(pair.label)" style="flex-grow:1;margin:10px;">{{ translate("SYNC.STOPPAIR") }}</button>
+                   </div>
+                   <div v-if="syncPairs.length==0">
+                   {{ translate("SYNC.FOLDER") }}
+                   </div>
+                </div>
+            </div>
+            <div v-if="!enabled" style="width:100%;">
+                <center>
+                <div class="hspace-5" style="max-width:600px;">
+                    <h1>{{ translate("SYNC.DISABLED.TITLE") }}</h1>
+		    {{ translate("SYNC.DISABLED") }}
+                    <br/>
+                    <a href="https://vaultobject.org/download" target="_blank">https://vaultobject.org/download</a>
+                    <br/><br/>
+                    {{ translate("SYNC.DISABLED2") }}
+                </div>
+                </center>
+            </div>
+            <FolderPicker
+                v-if="showFolderPicker"
+                :baseFolder="folderPickerBaseFolder" :selectedFolder_func="selectedFoldersFromPicker"
+                :multipleFolderSelection="multipleFolderSelection"
+                :initiallySelectedPaths="initiallySelectedPaths"
+                :noDriveSelection="true"
+                :pickerTitle="pickerTitle">
+            </FolderPicker>
+
+            <SimpleFolderPicker
+              v-if="showSimpleFolderPicker"
+              :drives="drivesSimplePicker"
+              :selectedFolder_func="selectedFoldersFromSimplePicker"
+              :preloadFolders_func="preloadHostFolders"
+              :multipleFolderSelection="multipleFolderSelectionSimplePicker"
+              :pickerTitle="simplePickerTitle">
+            </SimpleFolderPicker>
+            <Spinner v-if="showSpinner" :message="spinnerMessage"></Spinner>
+            <Select
+                v-if="showSelect"
+                v-on:hide-select="showSelect = false"
+                :select_message='select_message'
+                :select_body="select_body"
+                :select_consumer_func="select_consumer_func"
+                :select_options="select_options">
+            </Select>
+            <!--<input
+               type="file"
+                id="uploadDirectoriesInput"
+                @change="uploadFiles"
+                style="display: none"
+                multiple
+                directory
+                mozDirectory
+                webkitDirectory
+            />!-->
+        </main>
+   </article>
+</template>
+
+<script>
+const AppHeader = require("../components/AppHeader.vue");
+const FolderPicker = require('../components/picker/FolderPicker.vue');
+const Select = require('../components/choice/Select.vue');
+
+const SimpleFolderPicker = require('../components/picker/SimpleFolderPicker.vue');
+const Spinner = require("../components/spinner/Spinner.vue");
+
+const i18n = require("../i18n/index.js");
+
+const routerMixins = require("../mixins/router/index.js");
+
+module.exports = {
+	components: {
+		AppHeader,
+		FolderPicker,
+		Select,
+		SimpleFolderPicker,
+        Spinner,
+	},
+    data() {
+        return {
+            syncPairs: [],
+            showSimpleFolderPicker: false,
+            drivesSimplePicker: [],
+            multipleFolderSelectionSimplePicker: false,
+            showFolderPicker: false,
+            showHostFolderPicker: false,
+            folderPickerBaseFolder: "",
+            multipleFolderSelection: false,
+            initiallySelectedPaths: [],
+            hostFolderTree: {},
+            pickerTitle: "Remote Folder (create in Drive first)",
+            simplePickerTitle: "Local Folder",
+            showSpinner: false,
+            spinnerMessage: '',
+            showSelect: false,
+            select_message: '',
+            select_body: '',
+            select_consumer_func: () => {},
+            select_options: [],
+            status: "",
+            updateStatusIntervalID: "",
+            error: null,
+        }
+    },
+    props: [],
+	mixins:[routerMixins, i18n],
+
+	computed: {
+		...Vuex.mapState([
+			'context',
+		]),
+		...Vuex.mapGetters([
+			'getPath'
+		]),
+                hasError(){
+                   return this.error != null;
+                },
+                enabled() {
+                   return window.location.hostname == "localhost";
+                },
+    },
+	created() {
+        this.getSyncState();
+        var that = this;
+        this.updateStatusIntervalID = setInterval(() => {
+            that.updateStatus();
+        }, 1000);
+    },
+    destroyed() {
+        clearInterval(this.updateStatusIntervalID);
+    },
+    methods: {
+		...Vuex.mapActions([
+			'updateSocial'
+		]),
+        localPost(url, body) {
+            return new Promise(function(resolve, reject) {
+                var req = new XMLHttpRequest();
+                req.open('POST', url);
+                req.responseType = 'json';
+
+                req.onload = function() {
+                    // This is called even on 404 etc
+                    // so check the status
+                    if (req.status == 200) {
+                        resolve(req.response);
+                    }
+                    else {
+                        try {
+                            let trailer = req.getResponseHeader("Trailer");
+                            if (trailer == null) {
+                                reject('Unexpected error from server');
+                            } else {
+                                reject(trailer);
+                            }
+                        } catch (e) {
+                            reject(e);
+                        }
+                    }
+	            };
+	    
+	            req.onerror = function(e) {
+                    reject(Error("Unable to connect"));
+	            };
+            
+                req.ontimeout = function() {
+                    reject(Error("Network timeout"));
+                };
+            
+	            req.send(body != null ? body : new Int8Array(0));
+            })
+        },
+
+        getSyncState() {
+            let that = this;
+            this.localPost("/peergos/v0/sync/get-pairs").then(function(result, err) {
+               that.syncPairs = result.pairs;
+            })
+        },
+
+        updateStatus() {
+            let that = this;
+            this.localPost("/peergos/v0/sync/status").then(function(result, err) {
+                if (result != null) {
+                    that.status = result.msg;
+                    that.error = result.error;
+                }
+            })
+        },
+
+        prettifyHostFolder(uri) {
+           if (! uri.startsWith("content://") && ! uri.startsWith("//"))
+              return uri;
+           // e.g. content://com.android.externalstorage.documents/tree/primary%3ADocuments
+           // e.g. //com.android.externalstorage.documents/tree/primary%3ADocuments
+           // or an sdcard e,g /tree/3DE6-6834%3Atestdir
+           var res = new URL(uri);
+           var path = res.pathname;
+           path = path.replaceAll("%2F", "/").replaceAll("%3A", ":")
+           const prefix = "/tree/primary:"
+           if (path.startsWith(prefix))
+              return path.substring(prefix.length);
+           if (new RegExp("/tree/[A-Z0-9]{4}-[A-Z0-9]{4}:.*").test(path))
+              return "/sdcard/" + path.substring(16);
+           return path;
+        },
+
+        getHostDirTree(prefix) {
+            let future = peergos.shared.util.Futures.incomplete();
+            prefix = prefix != null ? encodeURIComponent(prefix) : "%2F";
+            this.localPost("/peergos/v0/sync/get-host-paths?prefix=" + prefix).then(function(result, err) {
+               future.complete(result);
+            });
+            return future;
+        },
+
+        openNativeHostDirChooser() {
+            let future = peergos.shared.util.Futures.incomplete();
+            this.localPost("/peergos/v0/sync/get-host-dir").then(function(result, err) {
+               future.complete(result.root);
+            })
+            return future;
+        },
+
+        getHostDir() {
+            let isAndroid = navigator.userAgent.indexOf("android") > -1;
+            if (isAndroid)
+               return this.openNativeHostDirChooser();
+            return this.openHostFolderPicker();
+        },
+
+        getVaultObjectDir() {
+           return this.openVaultObjectFolderPicker();
+        },
+        getDeleteBehaviour() {
+            let future = peergos.shared.util.Futures.incomplete();
+            let that = this;
+            this.select_message = this.translate("SYNC.SELECT.DELETION.BEHAVIOUR");
+            this.select_body = '';
+            let syncLocalDeletesLabel = this.translate("SYNC.SELECT.DELETION.LOCAL");
+            let syncRemoteDeletesLabel = this.translate("SYNC.SELECT.DELETION.REMOTE");
+            this.select_consumer_func = (picked) => {
+                let syncLocalDeletes = picked.indexOf(syncLocalDeletesLabel) > -1;
+                let syncRemoteDeletes = picked.indexOf(syncRemoteDeletesLabel) > -1;
+                future.complete({syncLocalDeletes: syncLocalDeletes, syncRemoteDeletes: syncRemoteDeletes});
+            };
+            this.select_options = [syncLocalDeletesLabel, syncRemoteDeletesLabel];
+            this.showSelect = true;
+            return future;
+        },
+        addSyncPair() {
+            const that = this;
+            this.getHostDir().thenCompose(hostDir => {
+                if (hostDir == null) {
+                    return;
+                }
+                return that.getVaultObjectDir().thenCompose(vaultDir => {
+                    if (vaultDir == null) {
+                        return;
+                    }
+                    if (vaultDir.substring(1).split("/").length < 2) {
+                       throw "You cannot sync to your home dir, please make a sub folder";
+                    }
+                    return that.getDeleteBehaviour().thenCompose(deleteSelection => {
+                        const syncLocalDeletes = deleteSelection.syncLocalDeletes;
+                        const syncRemoteDeletes = deleteSelection.syncRemoteDeletes;
+                        that.$toast("Creating sync pair..", {id:"syncadd"});
+                        const vaultPath = peergos.client.PathUtils.directoryToPath(vaultDir.substring(1).split("/"));
+                        return that.context.shareWriteAccessWith(vaultPath, peergos.client.JsUtil.asSet([])).thenCompose(done => {
+                           return that.context.createSecretLink(vaultDir, true, java.util.Optional.empty(), "", "", false);
+                        }).thenCompose(link => {
+                           const cap = link.toLinkString(that.context.signer.publicKeyHash)
+                           const label = cap.substring(cap.lastIndexOf("/", cap.indexOf("#")) + 1, cap.indexOf("#"))
+                           that.localPost("/peergos/v0/sync/add-pair?label="+label, JSON.stringify({link:cap, dir:hostDir, syncLocalDeletes:syncLocalDeletes,syncRemoteDeletes:syncRemoteDeletes})).then(function(result, err) {
+                               if (err != null)
+                                  return
+                              that.syncPairs.push({localpath:hostDir, remotepath:vaultDir.toString(), label:label, syncLocalDeletes:syncLocalDeletes, syncRemoteDeletes:syncRemoteDeletes});
+                           })
+                           let future = peergos.shared.util.Futures.incomplete();
+                           future.complete(true);
+                           return future;
+                        }).exceptionally(t => console.log(t));
+                    });
+                });
+            });
+        },
+
+        syncNow(label) {
+            var that = this;
+            this.localPost("/peergos/v0/sync/sync-now?label="+label).then(function(result, err) {
+            })
+        },
+
+        removeSyncPair(label) {
+            var that = this;
+            this.localPost("/peergos/v0/sync/remove-pair?label="+label).then(function(result, err) {
+               if (err != null)
+                   return
+               var index = 0;
+               for (; index< that.syncPairs.length; index++) {
+                   if (that.syncPairs[index].label == label)
+                       break;
+               }
+               that.syncPairs.splice(index, 1);
+            })
+        },
+
+        close () {
+            this.$emit("hide-sync");
+        },
+        openVaultObjectFolderPicker() {
+            let future = peergos.shared.util.Futures.incomplete();
+            let that = this;
+            this.folderPickerBaseFolder = "/" + this.context.username;
+            this.selectedFoldersFromPicker = function (chosenFolders) {
+                if (chosenFolders.length == 0) {
+                    future.complete(null);
+                } else {
+                    let selectedFolder = chosenFolders[0];
+                    future.complete(selectedFolder);
+                }
+                that.showFolderPicker = false;
+            };
+            this.showFolderPicker = true;
+            return future;
+        },
+        setInitialState(state) {
+            state.initiallyOpen = state.children.length == 1;
+            if (state.initiallyOpen) {
+                this.setInitialState(state.children[0]);
+            } else {
+                state.initiallyOpen = true;
+            }
+        },
+        openHostFolderPicker() {
+            let future = peergos.shared.util.Futures.incomplete();
+            let that = this;
+            this.showSpinner = true;
+            this.getHostDirTree().thenApply(hostFolders => {
+                let sortedHostFolders = hostFolders.sort((a, b) => a.localeCompare(b, 'en', {'sensitivity': 'base'}));
+                let final = {result:[]};
+                for (const path of sortedHostFolders) {
+                    let context = final;
+                    let sep = path.indexOf("/") >= 0 ? '/' : '\\';
+                    let names = path.split(sep).filter(n => n.length > 0);
+                    for (var i = 0; i < names.length; i++) {
+                        let fullPath = "";
+                        for(var j = 0; j <= i && j < names.length; j++) {
+                            fullPath = fullPath + (fullPath == "" && sep == '\\' ? "" : sep) + names[j];
+                        }
+                        let name = names[i];
+                        if (!context[name]) {
+                            context[name] = {result:[]};
+                            context.result.push({path: fullPath, children: context[name].result});
+                        }
+                        context = context[name];
+                    }
+                }
+                that.hostFolderTree = {};
+                that.drivesSimplePicker = [];
+                final.result.forEach(result => {
+                    that.setInitialState(result);
+                    let rootPath = result.path;
+                    that.hostFolderTree[rootPath] = {"path":rootPath, "initiallyOpen": result.children.length == 1, "children": result.children};
+                    that.drivesSimplePicker.push(result.path);
+                });
+                that.showSpinner = false;
+                that.selectedFoldersFromSimplePicker = function (chosenFolders) {
+                    if (chosenFolders.length == 0) {
+                        future.complete(null);
+                    } else {
+                        let selectedFolder = chosenFolders[0];
+                        if (that.drivesSimplePicker.filter(i => i == selectedFolder).length == 1) {
+                            future.complete(null);
+                        } else {
+                            future.complete(selectedFolder);
+                        }
+                    }
+                    that.showSimpleFolderPicker = false;
+                };
+                that.showSimpleFolderPicker = true;
+            });
+            return future;
+        },
+        mergeTree(existing, updated) {
+           if (existing.children.length == 0) {
+              for (var i=0; i < updated.children.length; i++) {
+                 existing.children.push(updated.children[i]);
+              }
+           }
+           if (updated.loadChildren)
+              existing.loadChildren = true;
+
+           for (var i=0; i < updated.children.length; i++) {
+              var updatedChild = updated.children[i];
+              for (var j=0; j < existing.children.length; j++) {
+                 var existingChild = existing.children[j];
+                 if (existingChild.path == updatedChild.path)
+                    this.mergeTree(existingChild, updatedChild);
+              }
+           }
+        },
+        
+        preloadHostFolders: function(path, callback) {
+        let that = this;
+            this.getHostDirTree(path).thenApply(hostFolders => {
+                let sortedHostFolders = hostFolders.sort((a, b) => a.localeCompare(b, 'en', {'sensitivity': 'base'}));
+                let final = {result:[]};
+                let byPath = {};
+                for (const path of sortedHostFolders) {
+                    let context = final;
+                    let sep = path.indexOf("/") >= 0 ? '/' : '\\';
+                    let names = path.split(sep).filter(n => n.length > 0);
+                    for (var i = 0; i < names.length; i++) {
+                        let fullPath = "";
+                        for(var j = 0; j <= i && j < names.length; j++) {
+                            fullPath = fullPath + (fullPath == "" && sep == '\\' ? "" : sep) + names[j];
+                        }
+                        let name = names[i];
+                        if (!context[name]) {
+                            context[name] = {result:[]};
+                            let dir = {path: fullPath, children: context[name].result, loadChildren: i == names.length - 1};
+                            byPath[fullPath] = dir;
+                            context.result.push(dir);
+                        }
+                        if (i < names.length - 1)
+                            byPath[fullPath].loadChildren = false;
+                        context = context[name];
+                    }
+                }
+                final.result.forEach(result => {
+                    that.setInitialState(result);
+                    let rootPath = result.path;
+                    let dir = {"path":rootPath, "initiallyOpen": result.children.length == 1, "children": result.children, loadChildren: result.loadChildren};
+                    if (that.hostFolderTree[rootPath] == null)
+                        that.hostFolderTree[rootPath] = dir;
+                    else {
+                        that.mergeTree(that.hostFolderTree[rootPath], dir);
+                    }
+                });
+                callback(that.hostFolderTree[path]);
+            });
+        },
+        navigateTo: function (path) {
+            this.openFileOrDir("Drive", path, {filename:""});
+        },
+    },
+
+}
+</script>
+
+<style>
+.sync-view main{
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    min-height: 100vh;
+    padding: var(--app-margin);
+}
+
+</style>

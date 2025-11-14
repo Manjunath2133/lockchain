@@ -1,0 +1,23 @@
+language: java
+jdk:
+  - oraclejdk8
+
+after_failure:
+  - cat TEST-*.txt
+
+notifications:
+  email:
+    - christoph.boddy@gmail.com
+    - ianopolous@gmail.com
+    - kevodwyer@gmail.com
+
+sudo: required
+before_install:
+  - sudo apt-get install -qq pkg-config fuse
+  - sudo modprobe fuse
+  - sudo chmod 666 /dev/fuse
+  - sudo chown root:$USER /etc/fuse.conf
+  - wget https://dist.ipfs.io/go-ipfs/v0.4.1/go-ipfs_v0.4.1_linux-amd64.tar.gz
+  - tar xvfz go-ipfs_v0.4.1_linux-amd64.tar.gz
+  - go-ipfs/ipfs init
+  - go-ipfs/ipfs daemon &
